@@ -21,6 +21,7 @@ from stp3.trainer import TrainingModule
 from stp3.utils.network import NormalizeInverse
 from stp3.utils.geometry import (
     mat2pose_vec,
+    invert_matrix_egopose_numpy
 )
 
 from filterpy.kalman import MerweScaledSigmaPoints
@@ -35,6 +36,7 @@ from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
 
 # SAVE_PATH = os.environ.get('SAVE_PATH', None)
 # IS_BENCH2DRIVE = os.environ.get('IS_BENCH2DRIVE', None)
+is_obstacle_history = deque(maxlen=10)  # Keeps the last 5 values
 
 def get_entry_point():
     return 'Stp3Agent'
@@ -448,42 +450,63 @@ class Stp3Agent(AutoPilot):
         ## vis    
         self.vis(output, images, lidar)
         
+        
+
         def get_our_control(output):
             """ 
-            Use the output of the model to control the vehicle.
-            To ensure the vehicle successfully reaches the target position, steering control is handled by the autopilot.
-            In this case, only our throttle and brake controls are used.
-
-            Hint:
-            The future-predicted segmentation information is included in the output. You can use this information to make control decisions.
-            Refer to the vis function for guidance on extracting segmentation information from the output.
-
-            Args:
-                model's output(dict): The output of the model.
-
-            Returns:
-                carla.VehicleControl: The control for the vehicle.
-                - throttle (float) : A scalar value to control the vehicle throttle [0.0, 1.0]. Default is 0.0.
-                - steer (float) : A scalar value to control the vehicle steering [-1.0, 1.0]. Default is 0.0.
-                - brake (float) : A scalar value to control the vehicle brake [0.0, 1.0]. Default is 0.0.
+            Use the output of the model to control the vehicle with dynamic obstacle detection threshold.
             """
-            steer = 0.0
-            throttle = 0.0
-            brake = 0.0
-            # TODO_4: Implement the basic control logic
-            
-            raise NotImplementedError
+            steer = 0.0 
+            throttle = 1.0 
+            brake = 0.0 
+
+            drivable_area = output.get('area', None)
+            red_light = output.get('stop', None)
+            obstacles = output.get('segmentation', None)
+
+            if obstacles is not None and drivable_area is not None:
+                obstacle_prob = torch.softmax(obstacles, dim=2)  # Shape: [1, 7, 2, 256, 256]
+                obstacle_map = obstacle_prob[0, 2, 1, :, :].cpu().numpy() 
+
+                front_region = obstacle_map[80:100, 122:134]
+                segmentation_prob = output['segmentation'].argmax(dim=2).detach().cpu().numpy()
+                #print('segmentation_prob shape: ', segmentation_prob.shape)
+                close_area = segmentation_prob[0, 2, 80:100, 122:134]
+                indices = np.where(close_area > 0.4)
+
+                is_obstacle = np.max(front_region)
+
+                is_obstacle_history.append(is_obstacle)
+                #print('is_obstacle_history len', len(is_obstacle_history))
+
+                if len(is_obstacle_history) > 1:
+                    # Example: Use a weighted average as the threshold
+                    dynamic_threshold = np.mean(is_obstacle_history)
+                else:
+                    # Fallback to a default threshold if history is insufficient
+                    dynamic_threshold = 0.4
+
+                #print(f"Dynamic Threshold: {dynamic_threshold:.5f}")
+                #print(f"Current is_obstacle: {is_obstacle:.5f}")
+
+                if is_obstacle > 0.4:#dynamic_threshold:
+                    #print("Obstacle detected in the front region!")
+                    throttle = 0.0
+                    brake = 1.0
+                else:
+                    #print("No obstacles detected in the front region.")
+                    throttle = 0.7
+                    brake = 0.0
+            #else:
+                #print("Obstacle or area prediction is missing.")
+
             return carla.VehicleControl(steer=steer, throttle=throttle, brake=brake)
 
-        # Get the control from the autopilot
+
         control_by_autopilot = super().run_step(input_data, timestamp, plant=plant)
-        # Achieve our control using the output of the model
         our_control = get_our_control(output)
-        # Combine the control from the autopilot and the control from the model 
         control = carla.VehicleControl(steer=control_by_autopilot.steer, throttle=our_control.throttle, brake=our_control.brake)
             
-        # CARLA will not let the car drive in the initial frames.
-        # We set the action to brake so that the filter does not get confused.
         if self.step < self.config.inital_frames_delay:
             self.control = carla.VehicleControl(0.0, 0.0, 1.0)
         else:
@@ -1013,9 +1036,7 @@ class Stp3Agent(AutoPilot):
     def create_affine_mat(self, x1, y1, theta1, x2, y2, theta2):
         """
         Create an affine transformation matrix to map the BEV representation from one ego vehicle pose to another.
-        Please refer to the Documentation of Carla's coordinate system (https://github.com/autonomousvision/carla_garage/blob/main/docs/coordinate_systems.md)
-        The Compass coordinate system is different from the World's coordinate system.
-
+        
         Hint:
         You can follow OpenCV's or PyTorch's Affine Transformation process and return proper shape of your affine matrix.
         The wrap_features function in stp3.py will use this matrix to warp the BEV representation.        
@@ -1031,16 +1052,40 @@ class Stp3Agent(AutoPilot):
         Returns:
             np.ndarray: A affine transformation matrix.
         """
-        # carla coordinate system ( meter --> pixel )
+    # carla coordinate system ( meter --> pixel )
         bev_dim_x = int((32.0 - -32.0) / 0.25)
         bev_dim_y = int((32.0 - -32.0) / 0.25)
+
+            #raise NotImplementedError()
+            
+            # TODO_2-1: Implement the affine matrix calculation
         
-        # TODO_2-1: Implement the affine matrix calculation
         matrix = None
+        resolution = 0.25
+
+        rad1 = np.deg2rad(theta1)
+        rad2 = np.deg2rad(theta2)
+        dtheta = rad2 - rad1
+        rotate = np.array([
+            [np.cos(- rad1), -np.sin(- rad1)],
+            [np.sin(- rad1), np.cos(- rad1)]
+        ])
         
+        delta_pos = rotate @ np.array([x2 - x1, y2 - y1])
+        dx_pixel = delta_pos[1]/resolution + bev_dim_x//2
+        dy_pixel = -delta_pos[0]/resolution + bev_dim_y//2
+
         
-        raise NotImplementedError()
-        return matrix
+
+        matrix = np.array([
+            [np.cos(dtheta), -np.sin(dtheta), dx_pixel/(bev_dim_x /2)-1],
+            [np.sin(dtheta), np.cos(dtheta), dy_pixel/(bev_dim_y /2)-1]
+        ])
+
+            
+        return torch.tensor(matrix, dtype=torch.float32)
+
+
     
     def get_future_egomotion(self, seq_x, seq_y, seq_theta):
         """
@@ -1063,8 +1108,23 @@ class Stp3Agent(AutoPilot):
                         Each row represents the egomotion between two consecutive poses in the format:
                         [dx, dy, dz, roll, pitch, yaw].
         """
+        seq_theta_rad = np.deg2rad(seq_theta)
         future_egomotions = []
-        # TODO_1: Implement the future egomotion calculation
-        
-        raise NotImplementedError()
-        return future_egomotions
+
+        for i in range(len(seq_x) - 1):
+            dx = seq_x[i + 1] - seq_x[i]
+            dy = seq_y[i + 1] - seq_y[i]
+            dtheta = ((seq_theta_rad[i + 1] - seq_theta_rad[i]) + np.pi) % (2 * np.pi) - np.pi
+
+            cos_theta = np.cos(-seq_theta_rad[i])
+            sin_theta = np.sin(-seq_theta_rad[i])
+            ego_translation = np.array([cos_theta * dx - sin_theta * dy, sin_theta * dx + cos_theta * dy])
+
+            transformation_matrix = np.eye(4)
+            transformation_matrix[:2, 3] = ego_translation
+            transformation_matrix[:2, :2] = [[np.cos(dtheta), -np.sin(dtheta)], [np.sin(dtheta), np.cos(dtheta)]]
+
+            pose_vec = mat2pose_vec(torch.tensor(transformation_matrix, dtype=torch.float32))
+            future_egomotions.append(pose_vec)
+
+        return torch.stack(future_egomotions) 
