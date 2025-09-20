@@ -184,6 +184,7 @@ class STP3(nn.Module):
             # at time 0, no egomotion so feed zero vector
             future_egomotions_spatial = torch.cat([torch.zeros_like(future_egomotions_spatial[:, :1]),
                                                    future_egomotions_spatial[:, :(self.receptive_field-1)]], dim=1)
+            #print('future_egomotions_spatial:', future_egomotions_spatial.shape)
             x = torch.cat([x, future_egomotions_spatial], dim=-3)
         if self.cfg.MODEL.INPUT_LIDAR:
             x = torch.cat([x, lidar], dim=2)
@@ -380,10 +381,16 @@ class STP3(nn.Module):
         """
         # TODO_2-2: Implement the warp_features() function
         
+        grid = F.affine_grid(affine_mats, size=x.size(), align_corners=False)
+        warped_x = F.grid_sample(x, grid, mode='nearest', padding_mode='zeros', align_corners=False)
+
+
         
-        
-        raise NotImplementedError
-        return x
+        return warped_x
+    
+    def is_all_zero(self, tensor):
+
+        return torch.all(tensor == 0)
 
     def calculate_birds_eye_view_features(self, x, intrinsics, extrinsics, affine_mats, depths):
         """
@@ -395,21 +402,62 @@ class STP3(nn.Module):
         4. With self.temporal_coef, Apply the temporal fusion to the warped features.
         """
         b, s, n, c, h, w = x.shape
+
         # Reshape
-        x = pack_sequence_dim(x)
+        x = pack_sequence_dim(x) # torch.Size([1, 3, 6, 3, 224, 400])->torch.Size([3, 6, 3, 224, 400])
         intrinsics = pack_sequence_dim(intrinsics)
         extrinsics = pack_sequence_dim(extrinsics)
         affine_mats = pack_sequence_dim(affine_mats)
         geometry = self.get_geometry(intrinsics, extrinsics)
 
+               
         # TODO_3: Complete the calculate_birds_eye_view_features() function
+        hidden, depth, cam_front = self.encoder_forward(x)
         
-        raise NotImplementedError
+        x = hidden.clone()
+        #print('hidden: ', hidden)
+        bev = self.projection_to_birds_eye_view(hidden, geometry)
+        #if self.is_all_zero(bev):
+            #print("The tensor 'bev' is all zeros.")
+        #else:
+            #print("The tensor 'bev' contains non-zero values.")
+        warped_features = self.warp_features(bev, affine_mats)
+        #print('warped_features: ', warped_features)
+        warped_features = unpack_sequence_dim(warped_features, b, s)
+        # hidden:  torch.Size([3, 6, 32, 28, 50, 64])
+        # depth:  torch.Size([3, 6, 32, 28, 50])
+        # bev:  torch.Size([3, 64, 256, 256])
+        # affine_mats:  torch.Size([3, 2, 3])
+        # unpacked warped_features:  torch.Size([1, 3, 64, 256, 256]) 
+        # temporal_fused_features:  torch.Size([1, 3, 64, 256, 256])
+        # self.temporal_coef:  torch.Size([1, 3, 3, 1, 1, 1])
 
+
+        # Initialize temporally fused BEV feature tensor
+        temporal_fused_features = warped_features.clone()  # Start with current BEV features
+        #alpha = self.temporal_coef[0, t, i]  # Temporal discount factor
+        temporal_fused_features[:, 0] = warped_features[:, 0]
+        # Temporal fusion: Iterate over past frames
+        for t in range(1, s):
+            for i in range(t):
+                temporal_fused_features[:, t] += (self.temporal_coef[0, t, i] ** i) * temporal_fused_features[:, t-i]
+            temporal_fused_features[:, t] += warped_features[:, t]
+            
+        #print('hidden: ', hidden.shape)
+        #print('depth: ', depth.shape)
+        #print('affine_mats: ', affine_mats.shape)
+        #print('bev: ', bev.shape)
+        #print('warped_features: ', warped_features.shape)
+        #print('temporal_fused_features: ', temporal_fused_features.shape)
+        #print('self.temporal_coef: ', self.temporal_coef.shape)
+        
+        # ---------------
+        #x_list = unpack_sequence_dim(x_list, b, s)
         geometry = unpack_sequence_dim(geometry, b, s)
         depth = unpack_sequence_dim(depth, b, s)
         cam_front = unpack_sequence_dim(cam_front, b, s)[:,-1] if cam_front is not None else None
-        return x, depth, hidden, cam_front
+        #print('x:', x.shape)
+        return temporal_fused_features, depth, x, cam_front
 
     def distribution_forward(self, present_features, future_inputs, is_train, min_log_sigma, max_log_sigma):
         """
