@@ -1,6 +1,6 @@
 import os, argparse, json
 import numpy as np
-
+import math
 from scipy.spatial.transform import Rotation as R
 
 # for simulator
@@ -62,8 +62,28 @@ def your_fk(DH_params : dict, q : list or tuple or np.ndarray, base_pos) -> np.n
 
     # A = ? # may be more than one line
     # jacobian = ? # may be more than one line
+    t_list = []
+    cumulate_t = np.eye(4)
+    for i in range(len(DH_params)):
+        t_list.append(cumulate_t)
+        theta = q[i]
+        a = DH_params[i]['a']
+        d = DH_params[i]['d']
+        alpha = DH_params[i]['alpha']
+        T = np.array([[np.cos(theta), -np.sin(theta)*np.cos(alpha), np.sin(theta)*np.sin(alpha), a*np.cos(theta)],
+                        [np.sin(theta), np.cos(theta)*np.cos(alpha), -np.cos(theta)*np.sin(alpha), a*np.sin(theta)],
+                        [0, np.sin(alpha), np.cos(alpha), d],
+                        [0, 0, 0, 1]])
+        
+        cumulate_t = cumulate_t @ T
+    A = A @ cumulate_t
+    for i in range (len(DH_params)):
+        p = cumulate_t[:3, 3] - t_list[i][:3, 3]
+        z = t_list[i][:3, 2]
+        v = np.cross(z, p)
+        jacobian[:, i] = np.concatenate((v, z), axis=0)
 
-    raise NotImplementedError
+    #raise NotImplementedError
     # hint : 
     # https://automaticaddison.com/the-ultimate-guide-to-jacobian-matrices-for-robotics/
     
