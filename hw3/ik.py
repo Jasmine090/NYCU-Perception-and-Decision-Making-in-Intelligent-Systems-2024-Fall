@@ -84,9 +84,61 @@ def your_ik(robot_id, new_pose : list or tuple or np.ndarray,
 
     ###################
     
-    raise NotImplementedError
+    #raise NotImplementedError
+    # pseudo-inverse method
+    step_rate = 0.01
+    for _ in range(max_iters):
+
+        cur_pose, jacobian = your_fk(get_ur5_DH_params(), tmp_q, base_pos)
+        error = np.asarray(new_pose) - cur_pose
+        if np.linalg.norm(error) < stop_thresh:
+            break
+        jacobian_pseudo_inverse = np.linalg.pinv(jacobian)
+        delta_q = jacobian_pseudo_inverse @ error[:6]
+        tmp_q += step_rate * delta_q
+        tmp_q = np.clip(tmp_q, joint_limits[:, 0], joint_limits[:, 1])
+    
 
     return list(tmp_q) # 6 DoF
+
+
+# bonus: jacobian_transpose
+def your_ik_bonus(robot_id, new_pose : list or tuple or np.ndarray, 
+                base_pos, max_iters : int=1000, stop_thresh : float=.001):
+
+
+
+    joint_limits = np.asarray([
+            [-3*np.pi/2, -np.pi/2], # joint1
+            [-2.3562, -1],           # joint2
+            [-17, 17],              # joint3
+            [-17, 17],              # joint4
+            [-17, 17],              # joint5
+            [-17, 17],              # joint6
+        ])
+
+    # get current joint angles and gripper pos, (gripper pos is fixed)
+    num_q = p.getNumJoints(robot_id)
+    q_states = p.getJointStates(robot_id, range(0, num_q))
+    
+    tmp_q = np.asarray([x[0] for x in q_states][2:8]) # current joint angles 6d (You only need to modify this)
+        
+    step_rate = 0.1
+    for _ in range(max_iters):
+
+        cur_pose, jacobian = your_fk(get_ur5_DH_params(), tmp_q, base_pos)
+        error = np.asarray(new_pose) - cur_pose
+        if np.linalg.norm(error) < stop_thresh:
+            break
+        jacobian_transpose = jacobian.T
+        delta_q = jacobian_transpose @ error[:6]
+        tmp_q += step_rate * delta_q
+        tmp_q = np.clip(tmp_q, joint_limits[:, 0], joint_limits[:, 1])
+    
+
+    return list(tmp_q) # 6 DoF
+
+
 
 
 # TODO: [for your information]
@@ -125,7 +177,7 @@ def score_ik(robot, testcase_files : str, visualize : bool=False):
             # TODO: check your default arguments of `max_iters` and `stop_thresh` are your best parameters.
             #       We will only pass default arguments of your `max_iters` and `stop_thresh`.
             your_joint_poses = your_ik(robot.robot_id, poses[i], base_pos=robot._base_position) 
-            
+            #your_joint_poses = your_ik_bonus(robot.robot_id, poses[i], base_pos=robot._base_position) 
 
             # You can use `pybullet_ik` to see the correct version 
             # your_joint_poses = pybullet_ik(robot.robot_id, poses[i]) 
