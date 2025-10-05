@@ -18,7 +18,7 @@ test_scene = "replica_v1/apartment_0/habitat/mesh_semantic.ply"
 sim_settings = {
     "scene": test_scene,  # Scene path
     "default_agent": 0,  # Index of the default agent
-    "sensor_height": 1.5,  # Height of sensors in meters, relative to the agent
+    "sensor_height": 1.0,  # Height of sensors in meters, relative to the agent
     "width": 512,  # Spatial resolution of the observations
     "height": 512,
     "sensor_pitch": 0,  # sensor pitch (x rotation in rads)
@@ -92,13 +92,42 @@ def make_simple_cfg(settings):
         0.0,
         0.0,
     ]
+    
+    #rgb bev
+    rgb_sensor_spec_bev = habitat_sim.CameraSensorSpec()
+    rgb_sensor_spec_bev.uuid = "color_sensor_bev"
+    rgb_sensor_spec_bev.sensor_type = habitat_sim.SensorType.COLOR
+    rgb_sensor_spec_bev.resolution = [settings["height"], settings["width"]]
+    rgb_sensor_spec_bev.position = [0.0, 2.5, 0.0]
+    rgb_sensor_spec_bev.orientation = [
+        -(np.pi/2),
+        0.0,
+        0.0,
+    ]
+    rgb_sensor_spec_bev.sensor_subtype = habitat_sim.SensorSubType.PINHOLE
+    
+    #depth bev
+    depth_sensor_spec_bev = habitat_sim.CameraSensorSpec()
+    depth_sensor_spec_bev.uuid = "depth_sensor_bev"
+    depth_sensor_spec_bev.sensor_type = habitat_sim.SensorType.DEPTH
+    depth_sensor_spec_bev.resolution = [settings["height"], settings["width"]]
+    depth_sensor_spec_bev.position = [0.0, settings["sensor_height"], 0.0]
+    depth_sensor_spec_bev.orientation = [
+        -(np.pi/2),
+        0.0,
+        0.0,
+    ]
+    depth_sensor_spec_bev.sensor_subtype = habitat_sim.SensorSubType.PINHOLE
+    
+    
+    
     semantic_sensor_spec.sensor_subtype = habitat_sim.SensorSubType.PINHOLE
 
-    agent_cfg.sensor_specifications = [rgb_sensor_spec, depth_sensor_spec, semantic_sensor_spec]
+    agent_cfg.sensor_specifications = [rgb_sensor_spec, depth_sensor_spec, semantic_sensor_spec, rgb_sensor_spec_bev, depth_sensor_spec_bev]
 
     return habitat_sim.Configuration(sim_cfg, [agent_cfg])
 
-def navigateAndSee(action="", data_root='data_collection/second_floor/'):
+def navigateAndSee(action="", data_root='data_collection/second_floor/', record=False):
     global count
     observations = sim.step(action)
     #print("action: ", action)
@@ -110,15 +139,22 @@ def navigateAndSee(action="", data_root='data_collection/second_floor/'):
     sensor_state = agent_state.sensor_states['color_sensor']
     print("Frame:", count)
     print("camera pose: x y z rw rx ry rz")
+    # Record the trajectory
+    fp = open(data_root+'record.txt', 'a')
     print(sensor_state.position[0],sensor_state.position[1],sensor_state.position[2], sensor_state.rotation.w, sensor_state.rotation.x, sensor_state.rotation.y, sensor_state.rotation.z)
+    print(sensor_state.position[0],sensor_state.position[1],sensor_state.position[2], sensor_state.rotation.w, sensor_state.rotation.x, sensor_state.rotation.y, sensor_state.rotation.z, file=fp)
+    fp.close()
     
-    count += 1
+    
     cv2.imwrite(data_root + f"rgb/{count}.png", transform_rgb_bgr(observations["color_sensor"]))
+    cv2.imwrite(data_root + f"rgb_bev/{count}.png", transform_rgb_bgr(observations["color_sensor_bev"]))
     cv2.imwrite(data_root + f"depth/{count}.png", transform_depth(observations["depth_sensor"]))
+    cv2.imwrite(data_root + f"depth_bev/{count}.png", transform_depth(observations["depth_sensor_bev"]))
     cv2.imwrite(data_root + f"semantic/{count}.png", transform_semantic(observations["semantic_sensor"]))
-    
+    count += 1
     cam_extr.append([sensor_state.position[0], sensor_state.position[1], sensor_state.position[2], 
                     sensor_state.rotation.w, sensor_state.rotation.x, sensor_state.rotation.y, sensor_state.rotation.z])
+    
     
 
 parser = argparse.ArgumentParser()
@@ -136,7 +172,8 @@ agent_state = habitat_sim.AgentState()
 if args.floor == 1:
     agent_state.position = np.array([0.0, 0.0, 0.0])  # agent in world space
 elif args.floor == 2:
-    agent_state.position = np.array([0.0, 1.0, -1.0])  # agent in world space
+    #agent_state.rotation = np.array([0.0, 0.7660444378852844, 0.0, 0.6427875757217407])
+    agent_state.position = np.array([0.0,1.0,-1.0])  # agent in world space #0,1,-1/3.6572497, 2.4252348, 8.899618
 agent.set_state(agent_state)
 
 # obtain the default, discrete actions that an agent can perform
@@ -166,26 +203,28 @@ elif args.floor == 2:
 if os.path.isdir(data_root): 
     shutil.rmtree(data_root)  # WARNING: this line will delete whole directory with files
 
-for sub_dir in ['rgb/', 'depth/', 'semantic/']:
+for sub_dir in ['rgb/', 'rgb_bev/', 'depth/', 'depth_bev/', 'semantic/']:
     os.makedirs(data_root + sub_dir)
 
 count = 0
 action = "move_forward"
+fp = open(data_root + 'record.txt', 'w')
+fp.close()
+navigateAndSee(action, data_root, True)
 
-navigateAndSee(action, data_root)
 while True:
     keystroke = cv2.waitKey(0)
     if keystroke == ord(FORWARD_KEY):
         action = "move_forward"
-        navigateAndSee(action, data_root)
+        navigateAndSee(action, data_root, True)
         print("action: FORWARD")
     elif keystroke == ord(LEFT_KEY):
         action = "turn_left"
-        navigateAndSee(action, data_root)
+        navigateAndSee(action, data_root, True)
         print("action: LEFT")
     elif keystroke == ord(RIGHT_KEY):
         action = "turn_right"
-        navigateAndSee(action, data_root)
+        navigateAndSee(action, data_root, True)
         print("action: RIGHT")
     elif keystroke == ord(FINISH):
         print("action: FINISH")
